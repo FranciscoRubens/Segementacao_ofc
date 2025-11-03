@@ -145,11 +145,11 @@ def get_model_output(model_name, outputs):
     return outputs
 
 # GRIDS DE HIPERPARÂMETROS 
-param_grid_unet = {"learning_rate": [1e-3], "batch_size": [8], "optimizer": ["Adam", "AdamW"]}
-param_grid_att_unet = {"learning_rate": [1e-3], "batch_size": [8], "optimizer": ["Adam","AdamW"]}
-param_grid_unet3p = {"learning_rate": [1e-3], "batch_size": [8], "optimizer": ["Adam", "AdamW"]}
-param_grid_wnet = {"learning_rate": [5e-4], "batch_size": [ 8], "optimizer": ["Adam", "AdamW"]}
-param_grid_unetpp = {"learning_rate": [1e-3], "batch_size": [ 8], "optimizer": ["Adam", "AdamW"]}
+param_grid_unet = {"learning_rate": [1e-3, 5e-4, 1e-4], "batch_size": [8, 16], "optimizer": ["Adam", "AdamW"]}
+param_grid_att_unet = {"learning_rate": [1e-3, 5e-4, 1e-5], "batch_size": [8, 16], "optimizer": ["Adam", "SGD", "AdamW"]}
+param_grid_unet3p = {"learning_rate": [1e-3, 5e-4], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
+param_grid_wnet = {"learning_rate": [5e-4, 1e-4, 5e-5], "batch_size": [8, 16], "optimizer": ["Adam", "AdamW", "SGD"]}
+param_grid_unetpp = {"learning_rate": [1e-3, 5e-4], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
 
 model_param_grids = {
     "UNet": (UNet, param_grid_unet),
