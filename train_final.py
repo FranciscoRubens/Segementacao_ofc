@@ -334,38 +334,39 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
 # ============================================================
 # 2️⃣ TREINAMENTO FINAL COM DATASET1
 # ============================================================
+
 dataset1_train_dataset = MaskDataset(dataset1_imgs, dataset1_masks, transform=train_transform)
-final_models = {}
 
 for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]:
     
-    # Carregar a melhor configuração salva em arquivo
+    # Carregar melhor configuração
     config_path = os.path.join(base_dir, "resultados", model_name, f"best_config_{model_name}_overall.pkl")
     best_config = joblib.load(config_path)
     print(f"\n===== Treinamento final: {model_name} =====")
-    print(f"Usando melhor configuração do arquivo: {best_config}")
+    print(f"Usando melhor configuração: {best_config}")
 
     # DataLoader
-    train_loader = DataLoader(dataset1_train_dataset, batch_size=best_config["batch_size"], shuffle=True)
+    train_loader = DataLoader(dataset1_train_dataset, batch_size=best_config["batch_size"], shuffle=True, num_workers=2 if torch.cuda.is_available() else 0, pin_memory=torch.cuda.is_available())
 
-    # Criar modelo
-    model = create_model(model_name)
+    # Criar modelo e mover para device
+    model = create_model(model_name).to(device)
 
     # Otimizador
-    if best_config["optimizer"]=="Adam":
+    if best_config["optimizer"] == "Adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=best_config["learning_rate"])
-    elif best_config["optimizer"]=="AdamW":
+    elif best_config["optimizer"] == "AdamW":
         optimizer = torch.optim.AdamW(model.parameters(), lr=best_config["learning_rate"])
     else:
         optimizer = torch.optim.SGD(model.parameters(), lr=best_config["learning_rate"], momentum=0.9)
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=0.5)
-    history = {"train_dice":[]}
+    # Scheduler (reduz LR se o loss não melhorar)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
 
     # Treinamento final
     for epoch in range(50):
         model.train()
-        train_preds, train_targets = [], []
+        running_loss = 0.0
+
         for inputs, targets in train_loader:
             inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
@@ -373,14 +374,12 @@ for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]:
             loss = combined_loss(seg_pred, targets)
             loss.backward()
             optimizer.step()
+            running_loss += loss.item()
 
-            pred_bin = (seg_pred.detach().cpu().numpy() > 0.5).astype(np.uint8).squeeze(1)
-            train_preds.extend(pred_bin.flatten())
-            train_targets.extend(targets.cpu().numpy().flatten())
+        avg_loss = running_loss / len(train_loader)
+        scheduler.step(avg_loss)
 
-        train_metrics = calculate_metrics(train_targets, train_preds)
-        history["train_dice"].append(train_metrics["Dice"])
-        scheduler.step(train_metrics["Dice"])
+        print(f"Epoch [{epoch+1}/50] - Loss: {avg_loss:.4f}")
 
     # Salvar modelo final
     final_root = os.path.join(base_dir, "resultados_finais", "Dataset1", model_name)
