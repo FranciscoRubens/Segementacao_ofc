@@ -27,6 +27,13 @@ from Models.attunet import AttentionUNet
 from Models.unetplusplus import UNetPlusPlus
 from Models.unet3plus import UNet3Plus
 
+#Limpar a memória da GPU e coleta lixo do sistema.
+def clear_gpu_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
 # CONFIGURAÇÃO BASE 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Rodando em: {device}")
@@ -203,16 +210,18 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
         best_model_state = None
         best_config_fold = None
 
+        test_dataset = MaskDataset(fold_test_img, fold_test_mask, transform=val_transform)
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+
         for params in ParameterGrid(param_grid):
             print(f"\n Config: {params}")
 
             train_dataset = MaskDataset(train_img, train_mask, transform=train_transform)
             val_dataset = MaskDataset(val_img, val_mask, transform=val_transform)
-            test_dataset = MaskDataset(fold_test_img, fold_test_mask, transform=val_transform)
-
+            
             train_loader = DataLoader(train_dataset, batch_size=params["batch_size"], shuffle=True)
             val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
-            test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+            
 
             model = create_model(model_name)
             if params["optimizer"] == "Adam":
@@ -260,11 +269,14 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
                 best_config_fold = params
                 best_model_state = model.state_dict()
                 best_history_per_fold[fold] = history
-
-            torch.cuda.empty_cache()
-            gc.collect()
-
+            # LIMPEZA DE MEMÓRIA APÓS CADA CONFIGURAÇÃO
+            del model, optimizer, scheduler, train_loader, val_loader
+            clear_gpu_memory()
+        
+        # 🔻 LIMPEZA ANTES DE SALVAR O CHECKPOINT
+        clear_gpu_memory()
         # Salvar checkpoint do fold
+
         checkpoint_dir = os.path.join(base_dir, "checkpoints", model_name)
         os.makedirs(checkpoint_dir, exist_ok=True)
         torch.save(best_model_state, os.path.join(checkpoint_dir, f"best_model_{model_name}_fold{fold}.pt"))
@@ -275,6 +287,7 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
         print(f"Melhor config: {best_config_fold}")
 
         # Avaliação no fold test
+        model = create_model(model_name)   
         model.load_state_dict(best_model_state)
         model.eval()
         test_preds, test_targets = [], []
@@ -289,6 +302,10 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
         test_metrics['Fold'] = fold
         test_metrics['Config'] = str(best_config_fold)
         all_results.append(test_metrics)
+
+        # LIMPEZA APÓS TESTE DE FOLD
+        del model, test_loader,test_dataset
+        clear_gpu_memory()
 
         # Gráfico Dice
         best_history = best_history_per_fold[fold]
@@ -305,6 +322,9 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
         plt.grid(True, linestyle="--", alpha=0.6)
         plt.savefig(graph_path, bbox_inches="tight")
         plt.close()
+    
+    # LIMPEZA GERAL APÓS CADA MODELO
+    clear_gpu_memory()
 
     # Resultados finais do Grid Search
     results_root = os.path.join(base_dir, "resultados", model_name)
@@ -382,17 +402,19 @@ for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]:
     os.makedirs(final_root, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(final_root, f"{model_name}_final_trained.pt"))
 
+    # =====================================================
+    # 🔹 Limpeza de memória após terminar cada modelo
+    # =====================================================
+    del model, optimizer, scheduler, train_loader
+    clear_gpu_memory()
+
 # ============================================================
 # 3️⃣ AVALIAÇÃO EM DATASETS EXTERNOS
 # ============================================================
-final_models = {}
-for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]:
-    model = create_model(model_name)
-    model_path = os.path.join(base_dir, "resultados_finais", "Dataset1", model_name, f"{model_name}_final_trained.pt")
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
-    final_models[model_name] = model
+final_models_paths = {
+    model_name: os.path.join(base_dir, "resultados_finais", "Dataset1", model_name, f"{model_name}_final_trained.pt")
+    for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]
+}
 
 external_datasets = {"Dataset2": dataset2_dirs, "Dataset3": dataset3_dirs}
 
@@ -401,16 +423,21 @@ for dataset_name, dirs in external_datasets.items():
     test_dataset = MaskDataset(imgs, masks, transform=val_transform)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    for model_name, model in final_models.items():
+    for model_name, model_path in final_models_paths.items():
         print(f"\n===== Avaliação externa: {dataset_name} - {model_name} =====")
+
+        # Carregar e mover o modelo para device **apenas aqui**
+        model = create_model(model_name)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
         model.eval()
+
         preds_list, targets_list = [], []
 
         # Criar pasta de máscaras
         masks_pred_dir = os.path.join(base_dir, "resultados_finais", dataset_name, model_name, "masks_pred")
         os.makedirs(masks_pred_dir, exist_ok=True)
 
-        # Limite de máscaras salvas(limitei para não gerar muitas mascaras e ficar mais pesado)
         max_masks_to_save = 10
         saved_count = 0
 
@@ -425,23 +452,30 @@ for dataset_name, dirs in external_datasets.items():
                 if pred_bin.ndim == 3 and pred_bin.shape[0] == 1:
                     pred_bin = pred_bin[0]
 
-            # Salvar só as primeiras 10 máscaras 
             if saved_count < max_masks_to_save:
                 mask_img = Image.fromarray(pred_bin * 255)
                 mask_img.save(os.path.join(masks_pred_dir, f"mask_{i}.png"))
                 saved_count += 1
 
-            # Métricas 
             preds_list.extend(pred_bin.flatten())
             targets_list.extend(targets.cpu().numpy().flatten())
 
-        # Calcular métricas e salvar
         metrics = calculate_metrics(targets_list, preds_list)
         metrics_df = pd.DataFrame([metrics])
         metrics_root = os.path.join(base_dir, "resultados_finais", dataset_name, model_name)
         os.makedirs(metrics_root, exist_ok=True)
         metrics_df.to_csv(os.path.join(metrics_root, "metrics.csv"), index=False)
         print(f"Métricas salvas: {metrics_root}")
+
+        # Limpeza após avaliação de cada modelo
+        del model, preds_list, targets_list
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    # Limpeza após terminar todo o dataset
+    del test_loader, test_dataset
+    torch.cuda.empty_cache()
+    gc.collect()
 
 
 # ============================================================
