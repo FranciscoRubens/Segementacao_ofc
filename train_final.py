@@ -19,6 +19,8 @@ from imblearn.metrics import specificity_score
 from sklearn.metrics import f1_score as dice_coefficient
 from scipy.stats import wilcoxon
 import itertools
+import sys
+
 
 # IMPORTAR ARQUITETURAS 
 from Models.unet import UNet
@@ -26,6 +28,14 @@ from Models.wnet import WNet
 from Models.attunet import AttentionUNet
 from Models.unetplusplus import UNetPlusPlus
 from Models.unet3plus import UNet3Plus
+
+# Quando passar o nome da rede no docker run, ele vem aqui
+if len(sys.argv) > 1:
+    rede_escolhida = sys.argv[1]
+    print(f"\n>>> Executando a rede: {rede_escolhida}\n")
+else:
+    rede_escolhida = None
+    print("\n>>> Executando TODAS as redes\n")
 
 #Limpar a memória da GPU e coleta lixo do sistema.
 def clear_gpu_memory():
@@ -38,7 +48,9 @@ def clear_gpu_memory():
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Rodando em: {device}")
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir = os.getcwd()
+for folder in ["graficos", "checkpoints", "resultados", "resultados_finais"]:
+    os.makedirs(os.path.join(base_dir, folder), exist_ok=True)
 datasets_dir = os.path.join(base_dir, "Dataset")
 
 dataset1_dirs = {"images": os.path.join(datasets_dir, "Archive/images"),
@@ -155,7 +167,7 @@ def get_model_output(model_name, outputs):
 param_grid_unet = {"learning_rate": [1e-3, 5e-4], "batch_size": [8, 16], "optimizer": ["Adam", "AdamW"]}
 param_grid_att_unet = {"learning_rate": [1e-3, 5e-4], "batch_size": [8, 16], "optimizer": ["Adam","AdamW"]}
 param_grid_unet3p = {"learning_rate": [1e-3, 5e-4], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
-param_grid_wnet = {"learning_rate": [1e-4, 5e-5], "batch_size": [8, 16], "optimizer": ["Adam", "AdamW"]}
+param_grid_wnet = {"learning_rate": [1e-4, 5e-5], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
 param_grid_unetpp = {"learning_rate": [1e-3, 5e-4], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
 
 model_param_grids = {
@@ -186,6 +198,8 @@ dataset1_imgs, dataset1_masks = load_paths_auto(dataset1_dirs["images"], dataset
 best_configs_all = {}
 
 for model_name, (model_class, param_grid) in model_param_grids.items():
+    if rede_escolhida is not None and model_name != rede_escolhida:
+        continue
     print("\n" + "="*100)
     print(f" Treinando arquitetura: {model_name}")
     print("="*100)
@@ -355,7 +369,9 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
 
 dataset1_train_dataset = MaskDataset(dataset1_imgs, dataset1_masks, transform=train_transform)
 
-for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]:
+for model_name, (model_class, param_grid) in model_param_grids.items():
+    if rede_escolhida is not None and model_name != rede_escolhida:
+        continue
     
     # Carregar melhor configuração
     config_path = os.path.join(base_dir, "resultados", model_name, f"best_config_{model_name}_overall.pkl")
@@ -407,59 +423,78 @@ for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]:
     # =====================================================
     del model, optimizer, scheduler, train_loader
     clear_gpu_memory()
-
+    
 # ============================================================
 # 3️⃣ AVALIAÇÃO EM DATASETS EXTERNOS
 # ============================================================
+
 final_models_paths = {
-    model_name: os.path.join(base_dir, "resultados_finais", "Dataset1", model_name, f"{model_name}_final_trained.pt")
+    model_name: os.path.join(
+        base_dir, "resultados_finais", "Dataset1", model_name, f"{model_name}_final_trained.pt"
+    )
     for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]
 }
 
 external_datasets = {"Dataset2": dataset2_dirs, "Dataset3": dataset3_dirs}
 
 for dataset_name, dirs in external_datasets.items():
+    # Carregar paths de imagens e máscaras
     imgs, masks = load_paths_auto(dirs["images"], dirs["masks"])
     test_dataset = MaskDataset(imgs, masks, transform=val_transform)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    for model_name, model_path in final_models_paths.items():
+    for model_name, (model_class, param_grid) in model_param_grids.items():
+        # Filtra caso rede_escolhida esteja definida
+        if 'rede_escolhida' in globals() and rede_escolhida is not None and model_name != rede_escolhida:
+            continue
+
         print(f"\n===== Avaliação externa: {dataset_name} - {model_name} =====")
 
-        # Carregar e mover o modelo para device **apenas aqui**
+        # Obter o caminho do modelo
+        model_path = final_models_paths.get(model_name)
+        if model_path is None or not os.path.exists(model_path):
+            print(f"Caminho do modelo não encontrado para {model_name}. Pulando...")
+            continue
+
+        # Criar e carregar o modelo
         model = create_model(model_name)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.to(device)
         model.eval()
 
+        # Inicializar listas para armazenar previsões e máscaras
         preds_list, targets_list = [], []
 
-        # Criar pasta de máscaras
+        # Criar pasta para salvar máscaras previstas
         masks_pred_dir = os.path.join(base_dir, "resultados_finais", dataset_name, model_name, "masks_pred")
         os.makedirs(masks_pred_dir, exist_ok=True)
 
         max_masks_to_save = 10
         saved_count = 0
 
+        # Loop de inferência sobre o dataset de teste
         for i, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.to(device), targets.to(device)
             with torch.no_grad():
                 seg_pred = get_model_output(model_name, model(inputs))
 
+                # Binarizar saída
                 pred_bin = (seg_pred.detach().cpu().numpy() > 0.5).astype(np.uint8)
                 pred_bin = np.squeeze(pred_bin)
-
                 if pred_bin.ndim == 3 and pred_bin.shape[0] == 1:
                     pred_bin = pred_bin[0]
 
+            # Salvar algumas máscaras previstas para visualização
             if saved_count < max_masks_to_save:
                 mask_img = Image.fromarray(pred_bin * 255)
                 mask_img.save(os.path.join(masks_pred_dir, f"mask_{i}.png"))
                 saved_count += 1
 
+            # Guardar predições e máscaras verdadeiras para métricas
             preds_list.extend(pred_bin.flatten())
             targets_list.extend(targets.cpu().numpy().flatten())
 
+        # Calcular métricas e salvar
         metrics = calculate_metrics(targets_list, preds_list)
         metrics_df = pd.DataFrame([metrics])
         metrics_root = os.path.join(base_dir, "resultados_finais", dataset_name, model_name)
@@ -467,16 +502,15 @@ for dataset_name, dirs in external_datasets.items():
         metrics_df.to_csv(os.path.join(metrics_root, "metrics.csv"), index=False)
         print(f"Métricas salvas: {metrics_root}")
 
-        # Limpeza após avaliação de cada modelo
+        # Limpeza de memória após avaliação do modelo
         del model, preds_list, targets_list
         torch.cuda.empty_cache()
         gc.collect()
 
-    # Limpeza após terminar todo o dataset
+    # Limpeza de memória após terminar todo o dataset
     del test_loader, test_dataset
     torch.cuda.empty_cache()
     gc.collect()
-
 
 # ============================================================
 # 4️⃣ TESTE DE WILCOXON
