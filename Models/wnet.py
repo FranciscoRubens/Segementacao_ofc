@@ -26,9 +26,8 @@ class SeparableConv3x3(nn.Module):
     def forward(self, x):
         return self.block(x)
 
-# ===============================
+
 # BLOCO UNET COM 2 CONVOLUÇÕES
-# ===============================
 class UNetBlock(nn.Module):
     def __init__(self, in_ch, out_ch, separable=False):
         super().__init__()
@@ -40,9 +39,7 @@ class UNetBlock(nn.Module):
     def forward(self, x):
         return self.double_conv(x)
 
-# ===============================
 # W-NET
-# ===============================
 class WNet(nn.Module):
     def __init__(self, in_ch=1, out_ch=1, separable=False):
         super().__init__()
@@ -106,10 +103,11 @@ class WNet(nn.Module):
         u1 = self.up1_1(c8)
         u1 = torch.cat([u1, c1], 1)
         c9 = self.dec1_1(u1)
-        seg = self.final_seg(c9)  # **sem sigmoid!**
+        seg = self.final_seg(c9)  
 
+        
         # UNET 2 - Reconstrução
-        c1r = self.enc1_2(torch.sigmoid(seg))
+        c1r = self.enc1_2(seg)
         p1r = F.max_pool2d(c1r, 2)
         c2r = self.enc2_2(p1r)
         p2r = F.max_pool2d(c2r, 2)
@@ -130,6 +128,7 @@ class WNet(nn.Module):
         u1r = self.up1_2(c8r)
         u1r = torch.cat([u1r, c1r], 1)
         c9r = self.dec1_2(u1r)
-        recon = torch.sigmoid(self.final_recon(c9r))  # reconstrução mantém sigmoid
+        recon = torch.sigmoid(self.final_recon(c9r))
+
 
         return seg, recon

@@ -28,16 +28,22 @@ from Models.wnet import WNet
 from Models.attunet import AttentionUNet
 from Models.unetplusplus import UNetPlusPlus
 from Models.unet3plus import UNet3Plus
+from Models.transunet import TransUNet_ResNet50
+
+
+
+# Constantes 
+epochs = 50
+num_nucleos = 28
 
 # Quando passar o nome da rede no docker run, ele vem aqui
 if len(sys.argv) > 1:
     rede_escolhida = sys.argv[1]
-    print(f"\n>>> Executando a rede: {rede_escolhida}\n")
+    print(f"\n Executando a rede: {rede_escolhida}\n")
 else:
     rede_escolhida = None
-    print("\n>>> Executando TODAS as redes\n")
+    print("\n Executando TODAS as redes\n")
 
-#Limpar a memória da GPU e coleta lixo do sistema.
 def clear_gpu_memory():
     gc.collect()
     if torch.cuda.is_available():
@@ -118,16 +124,53 @@ val_transform = A.Compose([
 ])
 
 # PERDAS E MÉTRICAS
-def dice_loss(pred, target, smooth=1e-6):
-    pred = pred.view(-1)
-    target = target.view(-1)
-    intersection = (pred * target).sum()
-    return 1 - (2. * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+# =========================
+# PERDAS
+# =========================
 
-def combined_loss(pred, target):
-    bce = nn.BCELoss()(pred, target)
-    d_loss = dice_loss(pred, target)
-    return bce + d_loss
+def bce_loss(pred, target):
+    return nn.BCEWithLogitsLoss()(pred, target)
+
+
+def dice_loss_logits(pred, target, smooth=1e-6):
+    probs = torch.sigmoid(pred)
+    probs = probs.contiguous().view(-1)
+    target = target.contiguous().view(-1)
+    intersection = (probs * target).sum()
+    return 1 - (2. * intersection + smooth) / (probs.sum() + target.sum() + smooth)
+
+
+def focal_loss(pred, target, alpha=0.8, gamma=2):
+    bce = nn.BCEWithLogitsLoss(reduction="none")(pred, target)
+    probs = torch.sigmoid(pred)
+    pt = torch.where(target == 1, probs, 1 - probs)
+    loss = alpha * (1 - pt) ** gamma * bce
+    return loss.mean()
+
+
+def tversky_loss(pred, target, alpha=0.7, beta=0.3, smooth=1e-6):
+    probs = torch.sigmoid(pred)
+    probs = probs.contiguous().view(-1)
+    target = target.contiguous().view(-1)
+
+    TP = (probs * target).sum()
+    FP = ((1 - target) * probs).sum()
+    FN = (target * (1 - probs)).sum()
+
+    tversky = (TP + smooth) / (TP + alpha * FP + beta * FN + smooth)
+    return 1 - tversky
+
+def get_loss_function(loss_name):
+    if loss_name == "BCE":
+        return bce_loss
+    elif loss_name == "Dice":
+        return dice_loss_logits
+    elif loss_name == "Focal":
+        return focal_loss
+    elif loss_name == "Tversky":
+        return tversky_loss
+    else:
+        raise ValueError(f"Loss desconhecida: {loss_name}")
 
 def enhanced_alignment_measure(y_true, y_pred):
     y_true, y_pred = np.array(y_true, dtype=np.float32), np.array(y_pred, dtype=np.float32)
@@ -164,18 +207,22 @@ def get_model_output(model_name, outputs):
     return outputs
 
 # GRIDS DE HIPERPARÂMETROS 
-param_grid_unet = {"learning_rate": [1e-3, 5e-4], "batch_size": [8, 16], "optimizer": ["Adam", "AdamW"]}
-param_grid_att_unet = {"learning_rate": [1e-3, 5e-4], "batch_size": [8, 16], "optimizer": ["Adam","AdamW"]}
-param_grid_unet3p = {"learning_rate": [1e-3, 5e-4], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
-param_grid_wnet = {"learning_rate": [1e-4, 5e-5], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
-param_grid_unetpp = {"learning_rate": [1e-3, 5e-4], "batch_size": [4, 8], "optimizer": ["Adam", "AdamW"]}
+param_grid_unet      = {"learning_rate": [1e-3, 5e-4], "batch_size": [8], "optimizer": ["Adam", "AdamW"], "loss": ["BCE", "Focal", "Dice", "Tversky"]}
+param_grid_att_unet  = {"learning_rate": [1e-3, 5e-4], "batch_size": [8], "optimizer": ["Adam", "AdamW"], "loss": ["BCE", "Focal", "Dice", "Tversky"]}
+param_grid_unet3p    = {"learning_rate": [1e-3, 5e-4], "batch_size": [8], "optimizer": ["Adam", "AdamW"], "loss": ["BCE", "Focal", "Dice", "Tversky"]}
+param_grid_wnet      = {"learning_rate": [1e-3, 5e-4], "batch_size": [8], "optimizer": ["Adam", "AdamW"], "loss": ["BCE", "Focal", "Dice", "Tversky"]}
+param_grid_unetpp    = {"learning_rate": [1e-3, 5e-4], "batch_size": [8], "optimizer": ["Adam", "AdamW"], "loss": ["BCE", "Focal", "Dice", "Tversky"]}
+param_grid_transunet = {"learning_rate": [1e-3, 5e-4], "batch_size": [8], "optimizer": ["Adam", "AdamW"], "loss": ["BCE", "Focal", "Dice", "Tversky"]}
+
+
 
 model_param_grids = {
     "UNet": (UNet, param_grid_unet),
     "UNetPlusPlus": (UNetPlusPlus, param_grid_unetpp),
     "UNet3Plus": (UNet3Plus, param_grid_unet3p),
     "AttUNet": (AttentionUNet, param_grid_att_unet),
-    "WNet": (WNet, param_grid_wnet)
+    "WNet": (WNet, param_grid_wnet),
+    "TransUNet": (TransUNet_ResNet50, param_grid_transunet)
 }
 
 def create_model(model_name):
@@ -189,14 +236,16 @@ def create_model(model_name):
         return UNetPlusPlus(in_channels=1, out_channels=1).to(device)
     elif model_name == "WNet":
         return WNet(in_ch=1, out_ch=1).to(device)
+    elif model_name == "TransUNet":
+        return TransUNet_ResNet50(in_channels=1, num_classes=1, base_channels=32).to(device)
+    
 
-# ============================================================
-# 1️⃣ GRID SEARCH + K-FOLD (Dataset1)
-# ============================================================
+# GRID SEARCH + K-FOLD (Dataset1)
 dataset1_imgs, dataset1_masks = load_paths_auto(dataset1_dirs["images"], dataset1_dirs["masks"])
 
 best_configs_all = {}
-
+print(model_param_grids.items())
+model_name = UNetPlusPlus
 for model_name, (model_class, param_grid) in model_param_grids.items():
     if rede_escolhida is not None and model_name != rede_escolhida:
         continue
@@ -209,6 +258,7 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
     best_configs = []
     kf = KFold(n_splits=10, shuffle=True, random_state=42)  
 
+    
     for fold, (train_idx, test_idx) in enumerate(kf.split(dataset1_imgs), 1):
         print(f"\n--- Fold {fold} ---")
         fold_train_img = [dataset1_imgs[i] for i in train_idx]
@@ -238,39 +288,42 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
             
 
             model = create_model(model_name)
+            criterion = get_loss_function(params["loss"])
+
             if params["optimizer"] == "Adam":
                 optimizer = torch.optim.Adam(model.parameters(), lr=params["learning_rate"])
             elif params["optimizer"] == "AdamW":
                 optimizer = torch.optim.AdamW(model.parameters(), lr=params["learning_rate"])
-          
+    
+
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=0.5)
             history = {"train_dice": [], "val_dice": []}
 
-            for epoch in range(50):  # número de épocas do Grid Search
+            for epoch in range(epochs):  # número de épocas do Grid Search
                 model.train()
                 train_preds, train_targets = [], []
                 for inputs, targets in train_loader:
                     inputs, targets = inputs.to(device), targets.to(device)
                     optimizer.zero_grad()
                     seg_pred = get_model_output(model_name, model(inputs))
-                    loss = combined_loss(seg_pred, targets)
+                    loss = criterion(seg_pred, targets)
                     loss.backward()
                     optimizer.step()
 
-                    pred_bin = (seg_pred.detach().cpu().numpy() > 0.5).astype(np.uint8).squeeze(1)
+                    pred_bin = (torch.sigmoid(seg_pred).detach().cpu().numpy() > 0.5)
                     train_preds.extend(pred_bin.flatten())
                     train_targets.extend(targets.cpu().numpy().flatten())
                 train_metrics = calculate_metrics(train_targets, train_preds)
                 history["train_dice"].append(train_metrics["Dice"])
 
-                # Validação
+                
                 model.eval()
                 val_preds, val_targets = [], []
                 with torch.no_grad():
                     for inputs, targets in val_loader:
                         inputs, targets = inputs.to(device), targets.to(device)
                         seg_pred = get_model_output(model_name, model(inputs))
-                        pred_bin = (seg_pred.detach().cpu().numpy() > 0.5).astype(np.uint8).squeeze(1)
+                        pred_bin = (torch.sigmoid(seg_pred).detach().cpu().numpy() > 0.5)
                         val_preds.extend(pred_bin.flatten())
                         val_targets.extend(targets.cpu().numpy().flatten())
                 val_metrics = calculate_metrics(val_targets, val_preds)
@@ -283,14 +336,13 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
                 best_config_fold = params
                 best_model_state = model.state_dict()
                 best_history_per_fold[fold] = history
-            # LIMPEZA DE MEMÓRIA APÓS CADA CONFIGURAÇÃO
+
             del model, optimizer, scheduler, train_loader, val_loader
             clear_gpu_memory()
         
-        # 🔻 LIMPEZA ANTES DE SALVAR O CHECKPOINT
+       
         clear_gpu_memory()
-        # Salvar checkpoint do fold
-
+        
         checkpoint_dir = os.path.join(base_dir, "checkpoints", model_name)
         os.makedirs(checkpoint_dir, exist_ok=True)
         torch.save(best_model_state, os.path.join(checkpoint_dir, f"best_model_{model_name}_fold{fold}.pt"))
@@ -309,7 +361,7 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
             for inputs, targets in test_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                 seg_pred = get_model_output(model_name, model(inputs))
-                pred_bin = (seg_pred.detach().cpu().numpy() > 0.5).astype(np.uint8).squeeze(1)
+                pred_bin = (torch.sigmoid(seg_pred).detach().cpu().numpy() > 0.5)
                 test_preds.extend(pred_bin.flatten())
                 test_targets.extend(targets.cpu().numpy().flatten())
         test_metrics = calculate_metrics(test_targets, test_preds)
@@ -317,7 +369,7 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
         test_metrics['Config'] = str(best_config_fold)
         all_results.append(test_metrics)
 
-        # LIMPEZA APÓS TESTE DE FOLD
+        
         del model, test_loader,test_dataset
         clear_gpu_memory()
 
@@ -337,7 +389,7 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
         plt.savefig(graph_path, bbox_inches="tight")
         plt.close()
     
-    # LIMPEZA GERAL APÓS CADA MODELO
+    
     clear_gpu_memory()
 
     # Resultados finais do Grid Search
@@ -346,7 +398,6 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
     df_results = pd.DataFrame(all_results)
     df_results.to_csv(os.path.join(results_root, f"gridsearch_{model_name}_folds_final.csv"), index=False)
 
-    # Média e desvio
     metrics_cols = ["Accuracy","Specificity","Sensitivity","E-measure","MAE","IoU","Dice"]
     mean_metrics = df_results[metrics_cols].mean()
     std_metrics = df_results[metrics_cols].std()
@@ -363,39 +414,34 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
     best_configs_all[model_name] = best_overall_config
     joblib.dump(best_overall_config, os.path.join(results_root, f"best_config_{model_name}_overall.pkl"))
 
-# ============================================================
-# 2️⃣ TREINAMENTO FINAL COM DATASET1
-# ============================================================
 
+# TREINAMENTO FINAL COM DATASET1
 dataset1_train_dataset = MaskDataset(dataset1_imgs, dataset1_masks, transform=train_transform)
 
 for model_name, (model_class, param_grid) in model_param_grids.items():
     if rede_escolhida is not None and model_name != rede_escolhida:
         continue
     
-    # Carregar melhor configuração
     config_path = os.path.join(base_dir, "resultados", model_name, f"best_config_{model_name}_overall.pkl")
     best_config = joblib.load(config_path)
     print(f"\n===== Treinamento final: {model_name} =====")
     print(f"Usando melhor configuração: {best_config}")
 
-    # DataLoader
-    train_loader = DataLoader(dataset1_train_dataset, batch_size=best_config["batch_size"], shuffle=True, num_workers=2 if torch.cuda.is_available() else 0, pin_memory=torch.cuda.is_available())
+    train_loader = DataLoader(dataset1_train_dataset, batch_size=best_config["batch_size"], shuffle=True, num_workers=num_nucleos if torch.cuda.is_available() else 0, pin_memory=torch.cuda.is_available())
 
-    # Criar modelo e mover para device
     model = create_model(model_name).to(device)
+    criterion = get_loss_function(best_config["loss"])
 
-    # Otimizador
     if best_config["optimizer"] == "Adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=best_config["learning_rate"])
     elif best_config["optimizer"] == "AdamW":
         optimizer = torch.optim.AdamW(model.parameters(), lr=best_config["learning_rate"])
+
     
-    # Scheduler (reduz LR se o loss não melhorar)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
 
     # Treinamento final
-    for epoch in range(50):
+    for epoch in range(epochs):
         model.train()
         running_loss = 0.0
 
@@ -403,7 +449,7 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
             inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
             seg_pred = get_model_output(model_name, model(inputs))
-            loss = combined_loss(seg_pred, targets)
+            loss = criterion(seg_pred, targets)
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
@@ -411,86 +457,75 @@ for model_name, (model_class, param_grid) in model_param_grids.items():
         avg_loss = running_loss / len(train_loader)
         scheduler.step(avg_loss)
 
-        print(f"Epoch [{epoch+1}/50] - Loss: {avg_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{epochs}] - Loss: {avg_loss:.4f}")
 
     # Salvar modelo final
     final_root = os.path.join(base_dir, "resultados_finais", "Dataset1", model_name)
     os.makedirs(final_root, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(final_root, f"{model_name}_final_trained.pt"))
 
-    # =====================================================
-    # 🔹 Limpeza de memória após terminar cada modelo
-    # =====================================================
     del model, optimizer, scheduler, train_loader
     clear_gpu_memory()
     
-# ============================================================
-# 3️⃣ AVALIAÇÃO EM DATASETS EXTERNOS
-# ============================================================
+# AVALIAÇÃO EXTERNA
 
 final_models_paths = {
     model_name: os.path.join(
         base_dir, "resultados_finais", "Dataset1", model_name, f"{model_name}_final_trained.pt"
     )
-    for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet"]
+    for model_name in ["UNet", "UNetPlusPlus", "UNet3Plus", "AttUNet", "WNet", "TransUNet"]
 }
 
 external_datasets = {"Dataset2": dataset2_dirs, "Dataset3": dataset3_dirs}
 
 for dataset_name, dirs in external_datasets.items():
-    # Carregar paths de imagens e máscaras
+
+
     imgs, masks = load_paths_auto(dirs["images"], dirs["masks"])
     test_dataset = MaskDataset(imgs, masks, transform=val_transform)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     for model_name, (model_class, param_grid) in model_param_grids.items():
-        # Filtra caso rede_escolhida esteja definida
+       
         if 'rede_escolhida' in globals() and rede_escolhida is not None and model_name != rede_escolhida:
             continue
 
         print(f"\n===== Avaliação externa: {dataset_name} - {model_name} =====")
 
-        # Obter o caminho do modelo
         model_path = final_models_paths.get(model_name)
         if model_path is None or not os.path.exists(model_path):
             print(f"Caminho do modelo não encontrado para {model_name}. Pulando...")
             continue
 
-        # Criar e carregar o modelo
         model = create_model(model_name)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.to(device)
         model.eval()
 
-        # Inicializar listas para armazenar previsões e máscaras
         preds_list, targets_list = [], []
 
-        # Criar pasta para salvar máscaras previstas
         masks_pred_dir = os.path.join(base_dir, "resultados_finais", dataset_name, model_name, "masks_pred")
         os.makedirs(masks_pred_dir, exist_ok=True)
 
         max_masks_to_save = 10
         saved_count = 0
 
-        # Loop de inferência sobre o dataset de teste
         for i, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.to(device), targets.to(device)
             with torch.no_grad():
                 seg_pred = get_model_output(model_name, model(inputs))
 
-                # Binarizar saída
-                pred_bin = (seg_pred.detach().cpu().numpy() > 0.5).astype(np.uint8)
+             
+                pred_bin = (torch.sigmoid(seg_pred).detach().cpu().numpy() > 0.5)
                 pred_bin = np.squeeze(pred_bin)
                 if pred_bin.ndim == 3 and pred_bin.shape[0] == 1:
                     pred_bin = pred_bin[0]
 
-            # Salvar algumas máscaras previstas para visualização
             if saved_count < max_masks_to_save:
                 mask_img = Image.fromarray(pred_bin * 255)
                 mask_img.save(os.path.join(masks_pred_dir, f"mask_{i}.png"))
                 saved_count += 1
 
-            # Guardar predições e máscaras verdadeiras para métricas
             preds_list.extend(pred_bin.flatten())
             targets_list.extend(targets.cpu().numpy().flatten())
 
@@ -502,37 +537,11 @@ for dataset_name, dirs in external_datasets.items():
         metrics_df.to_csv(os.path.join(metrics_root, "metrics.csv"), index=False)
         print(f"Métricas salvas: {metrics_root}")
 
-        # Limpeza de memória após avaliação do modelo
+        
         del model, preds_list, targets_list
         torch.cuda.empty_cache()
         gc.collect()
-
-    # Limpeza de memória após terminar todo o dataset
+ 
     del test_loader, test_dataset
     torch.cuda.empty_cache()
     gc.collect()
-
-# ============================================================
-# 4️⃣ TESTE DE WILCOXON
-# ============================================================
-
-wilcoxon_results = {}
-for (model_a, model_b) in itertools.combinations(best_configs_all.keys(), 2):
-    df_a = pd.read_csv(os.path.join(base_dir, "resultados", model_a, f"gridsearch_{model_a}_folds_final.csv"))
-    df_b = pd.read_csv(os.path.join(base_dir, "resultados", model_b, f"gridsearch_{model_b}_folds_final.csv"))
-    stat, p_val = wilcoxon(df_a["Dice"], df_b["Dice"])
-    wilcoxon_results[f"{model_a} vs {model_b}"] = p_val
-
-# Cria o DataFrame com coluna de significância
-wilcoxon_df = pd.DataFrame(list(wilcoxon_results.items()), columns=["Comparação","p-value"])
-wilcoxon_df["Significativo?"] = wilcoxon_df["p-value"].apply(lambda x: "Sim" if x <= 0.05 else "Não")
-
-# Salva o CSV
-wilcoxon_csv_path = os.path.join(base_dir, "resultados", "wilcoxon.csv")
-wilcoxon_df.to_csv(wilcoxon_csv_path, index=False)
-
-# Imprime os resultados no terminal
-print("\n Wilcoxon salvo! Resultados:")
-for idx, row in wilcoxon_df.iterrows():
-    signif_text = "Diferença significativa" if row["Significativo?"] == "Sim" else "Diferença não significativa"
-    print(f"{row['Comparação']}: {row['p-value']:.4f} ({signif_text})")

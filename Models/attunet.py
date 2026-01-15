@@ -98,4 +98,4 @@ class AttentionUNet(nn.Module):
         x = torch.cat([x, att1], dim=1)
         x = self.dconv_up1(x)
 
-        return torch.sigmoid(self.conv_last(x))
+        return self.conv_last(x)

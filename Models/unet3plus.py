@@ -114,6 +114,6 @@ class UNet3Plus(nn.Module):
             out2 = upsample_to(self.final[1](d2), x)
             out3 = upsample_to(self.final[2](d3), x)
             out4 = upsample_to(self.final[3](d4), x)
-            return [torch.sigmoid(out1), torch.sigmoid(out2), torch.sigmoid(out3), torch.sigmoid(out4)]
+            return [out1, out2, out3, out4]
         else:
-            return torch.sigmoid(self.final[0](d1))
+             return self.final[0](d1)

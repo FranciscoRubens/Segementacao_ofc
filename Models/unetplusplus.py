@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 
-# === Blocos da U-Net++ ===
+# Blocos da U-Net++ 
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -17,56 +17,59 @@ class ConvBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+
 class UpBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.up = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(in_channels, out_channels, 1)
         )
     def forward(self, x):
         return self.up(x)
 
+
 class UNetPlusPlus(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, base_filters=64, deep_supervision=True):
+    def __init__(self, in_channels=1, out_channels=1, base_filters=32, deep_supervision=True):
         super().__init__()
         self.deep_supervision = deep_supervision
         f = base_filters
 
-        # Encoder
+        # === Encoder ===
         self.conv00 = ConvBlock(in_channels, f)
         self.conv10 = ConvBlock(f, f*2)
         self.conv20 = ConvBlock(f*2, f*4)
         self.conv30 = ConvBlock(f*4, f*8)
         self.conv40 = ConvBlock(f*8, f*16)
+
         self.pool = nn.MaxPool2d(2)
 
-        # Decoder
-        self.conv01 = ConvBlock(f+f, f)
+        # === Decoder (canais corrigidos) ===
+        self.conv01 = ConvBlock(f + f, f)
         self.conv11 = ConvBlock(f*2 + f*2, f*2)
         self.conv21 = ConvBlock(f*4 + f*4, f*4)
         self.conv31 = ConvBlock(f*8 + f*8, f*8)
 
-        self.conv02 = ConvBlock(f+f+f, f)
+        self.conv02 = ConvBlock(f + f + f, f)
         self.conv12 = ConvBlock(f*2 + f*2 + f*2, f*2)
         self.conv22 = ConvBlock(f*4 + f*4 + f*4, f*4)
 
-        self.conv03 = ConvBlock(f+f+f+f, f)
+        self.conv03 = ConvBlock(f + f + f + f, f)
         self.conv13 = ConvBlock(f*2 + f*2 + f*2 + f*2, f*2)
 
-        self.conv04 = ConvBlock(f+f+f+f+f, f)
+        self.conv04 = ConvBlock(f + f + f + f + f, f)
 
-        # Upsample
+        # Upsampling
         self.up10 = UpBlock(f*2, f)
         self.up20 = UpBlock(f*4, f*2)
         self.up30 = UpBlock(f*8, f*4)
         self.up40 = UpBlock(f*16, f*8)
 
-        # Saídas para supervisão profunda
-        self.final1 = nn.Conv2d(f, out_channels, kernel_size=1)
-        self.final2 = nn.Conv2d(f, out_channels, kernel_size=1)
-        self.final3 = nn.Conv2d(f, out_channels, kernel_size=1)
-        self.final4 = nn.Conv2d(f, out_channels, kernel_size=1)
+        # Deep Supervision heads
+        self.final1 = nn.Conv2d(f, out_channels, 1)
+        self.final2 = nn.Conv2d(f, out_channels, 1)
+        self.final3 = nn.Conv2d(f, out_channels, 1)
+        self.final4 = nn.Conv2d(f, out_channels, 1)
 
     def forward(self, x):
         # Encoder
@@ -92,11 +95,11 @@ class UNetPlusPlus(nn.Module):
         x04 = self.conv04(torch.cat([x00, x01, x02, x03, self.up10(x13)], dim=1))
 
         if self.deep_supervision:
-            return [
-                torch.sigmoid(self.final1(x01)),
-                torch.sigmoid(self.final2(x02)),
-                torch.sigmoid(self.final3(x03)),
-                torch.sigmoid(self.final4(x04)),
-            ]
+           return [
+               self.final1(x01),
+               self.final2(x02),
+               self.final3(x03),
+               self.final4(x04),
+           ]
         else:
-            return torch.sigmoid(self.final4(x04))
+            return self.final4(x04)

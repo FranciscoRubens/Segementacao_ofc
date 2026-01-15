@@ -1,5 +1,4 @@
-# Imagem base com PyTorch 2.3 e CUDA 12.1
-FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+FROM python:3.12-slim
 
 # Diretório de trabalho
 WORKDIR /app
@@ -20,6 +19,7 @@ COPY requirements.txt .
 
 # Atualizar pip e instalar dependências Python
 RUN pip install --upgrade pip && \
+    pip  install torch torchvision --index-url https://download.pytorch.org/whl/cu130   && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copiar o restante do código

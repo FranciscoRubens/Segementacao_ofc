@@ -64,8 +64,4 @@ class UNet(nn.Module):
         x = self.upconv1(x)
         x = torch.cat([x, conv1], dim=1)
         x = self.dconv_up1(x)
-        if self.conv_last.out_channels == 1:
-            out = torch.sigmoid(self.conv_last(x))
-        else:
-            out = torch.softmax(self.conv_last(x), dim=1)
-        return out
+        return self.conv_last(x)
