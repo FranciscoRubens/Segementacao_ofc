@@ -124,9 +124,6 @@ val_transform = A.Compose([
 ])
 
 # PERDAS E MÉTRICAS
-# =========================
-# PERDAS
-# =========================
 
 def bce_loss(pred, target):
     return nn.BCEWithLogitsLoss()(pred, target)
